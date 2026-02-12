@@ -1,11 +1,17 @@
 from langchain.tools import tool
-from langchain_openai import ChatOpenAI
+from openai import AsyncOpenAI
 from langchain.messages import AnyMessage
 from typing_extensions import TypedDict, Annotated
 import operator
 from pydantic import BaseModel, Field
 from typing import Optional
-import json
+from dotenv import load_dotenv
+import os
+from langgraph.graph import StateGraph, START, END
+
+
+load_dotenv()
+llm_key = os.getenv("OPENAI_APIKEY")
 
 
 class MessagesState(TypedDict):
@@ -22,121 +28,115 @@ class ExtractedPrescription(BaseModel):
     route: Optional[str]
     form: Optional[str]
     instructions: Optional[str]
-    confidence: float
+    confidence: float = Field(gt=0, le=1.0)
 
 
-class PrescriptionExtractionResult(BaseModel):
+class ListPrescriptionExtractionModel(BaseModel):
     prescriptions: list[ExtractedPrescription]
     missing_fields: list[str]
     extraction_confidence: float
 
 
-@tool
-async def get_drug_prescription(transcript: str) -> ExtractedPrescription:
-    """Analyze a medical transcript to extract structured information.
+class PrescriptionGraphState(BaseModel):
+    messages: list[AnyMessage]
+    llm_calls: int = 0
+    transcript: Optional[str] = None
+    extracted_prescriptions: Optional[ListPrescriptionExtractionModel] = None
+    summary: Optional[str] = None
 
-    Args:
-        transcript: raw text of doctor-patient conversation
+
+class HasPrescriptionModel(BaseModel):
+    has_prescription: Optional[bool] = None
+    has_prescription_confidence: Optional[float] = Field(
+        default=None,
+        gt=0,
+        le=1.0,
+    )
+
+
+client = AsyncOpenAI(api_key=llm_key)
+
+
+agent_builder = StateGraph(PrescriptionGraphState)
+
+
+async def has_prescription(state: PrescriptionGraphState) -> dict:
+    """From the message input, LLM verify if there is any drug prescription"""
+    system_prompt = (
+        "Determine whether the following doctor-patient conversation includes "
+        "any medication prescription."
+    )
+    messages = state.messages
+    last_message = messages[-1]
+    if not isinstance(last_message.content, str):
+        raise ValueError(
+            "Failed to parse output answer related to has_precription node"
+        )
+    state.transcript = last_message.content
+
+    response = await client.responses.parse(
+        model="gpt-4.1-mini",
+        instructions=system_prompt,
+        input=state.transcript,
+        text_format=HasPrescriptionModel,
+        temperature=0.2,
+    )
+
+    if response.output_parsed is None:
+        raise ValueError(
+            "Failed to parse output answer related to has_precription node"
+        )
+
+    return {
+        "has_prescription_output": HasPrescriptionModel.model_validate(
+            response.output_parsed
+        )
+    }
+
+
+async def extract_drug_prescription(
+    state: PrescriptionGraphState,
+) -> dict:
     """
-    system_prompt = """You are a medical AI assistant specializing in analyzing doctor-patient conversations.
-Your task is to:
-1. Identify speakers and their roles (doctor vs patient)
-2. Extract prescription information in structured format
-3. Generate clarifying questions for missing CRITICAL safety information
-4. Provide a summary of the conversation
+    Extract drug prescription information explicitly stated
+    in a doctor-patient conversation.
+    """
 
-CRITICAL CLARIFYING QUESTIONS - If any of the following information is missing from the transcript, you MUST ask about it:
-- Patient allergies (MANDATORY if not mentioned)
-- Current medications for interaction checking (MANDATORY if not mentioned)
-- Patient weight/age for dosage calculation (MANDATORY if not mentioned)
-- Pregnancy status (if relevant to the prescribed medication)
-- Kidney/liver function (if relevant for the drug metabolism)
-- Any ambiguous prescription details (dosage, frequency, duration)
+    system_prompt = """
+You are a medical information extraction system.
 
-IMPORTANT: Return your response as valid JSON only, with this exact structure:
-{
-    "speaker_roles": {"Speaker Name": "role"},
-    "prescriptions": [
-        {
-            "drug_name": "string",
-            "dosage": "string",
-            "dosage_unit": "string",
-            "dosage_value": number,
-            "form": "string",
-            "frequency": "string",
-            "duration": "string or null",
-            "route": "string",
-            "instructions": "string or null",
-            "confidence": number (0.0-1.0)
-        }
-    ],
-    "clarifying_questions": ["question1", "question2"],
-    "summary": "string",
-    "confidence": number (0.0-1.0)
-}"""
+TASK:
+- Extract ONLY drug prescription information that is EXPLICITLY stated.
+- Do NOT infer, assume, or complete missing information.
+- If a field is not clearly stated, return null.
+- Do NOT generate questions.
+- Do NOT summarize.
+- Do NOT evaluate safety.
 
-    user_prompt = f"""Analyze this medical transcript and extract the required information:
+Return structured data only.
+"""
 
-TRANSCRIPT:
-{transcript}
-
-Remember to return ONLY valid JSON with the exact structure specified."""
-
-    try:
-        client = OpenAI(api_key=api_key)
-        model = "open-ai-model-name"
-        response = await client.messages.create(
-            model=model,
-            max_tokens=4096,
-            system=system_prompt,
-            messages=[{"role": "user", "content": user_prompt}],
+    if not isinstance(state.transcript, str):
+        raise ValueError(
+            "Failed to read transcript_text on extract_drug_prescription node"
         )
 
-        # Extract text from response
-        response_text = response.content[0].text
-        clean_json = self._extract_json_from_response(response_text)
+    response = await client.responses.parse(
+        model="gpt-4.1-mini",
+        instructions=system_prompt,
+        input=state.transcript,
+        text_format=ListPrescriptionExtractionModel,
+        temperature=0,
+    )
 
-        # Parse JSON response
-        analysis_data = json.loads(clean_json)
-
-        # Convert prescriptions to ExtractedPrescriptionModel
-        prescriptions = [
-            ExtractedPrescriptionModel(
-                drug_name=p["drug_name"],
-                dosage=p["dosage"],
-                dosage_unit=p["dosage_unit"],
-                dosage_value=float(p["dosage_value"]),
-                form=p.get("form") or "tablet",
-                frequency=p["frequency"],
-                duration=p.get("duration"),
-                route=p.get("route") or "oral",
-                instructions=p.get("instructions"),
-                confidence=float(p.get("confidence", 0.8)),
-            )
-            for p in analysis_data.get("prescriptions", [])
-        ]
-
-        return TranscriptAnalysisResult(
-            speaker_roles=analysis_data.get("speaker_roles", {}),
-            prescriptions=prescriptions,
-            clarifying_questions=analysis_data.get("clarifying_questions", []),
-            summary=analysis_data.get("summary", "Analysis completed"),
-            confidence=float(analysis_data.get("confidence", 0.8)),
+    if response.output_parsed is None:
+        raise ValueError("Failed to parse prescription extraction output")
+    return {
+        "prescription_output": ListPrescriptionExtractionModel.model_validate(
+            response.output_parsed
         )
+    }
 
-    except json.JSONDecodeError as e:
-        # Fallback if JSON parsing fails
-        # Log the raw response for debugging
-        print(f"JSON parsing error: {str(e)}")
-        print(f"Raw response: {response_text[:500]}")  # First 500 chars
-        return TranscriptAnalysisResult(
-            speaker_roles={"Doctor": "doctor", "Patient": "patient"},
-            prescriptions=[],
-            clarifying_questions=[
-                "Could you please rephrase the prescription information more clearly?"
-            ],
-            summary=f"Failed to parse transcript analysis: {str(e)}. Raw response: {response_text[:100]}",
-            confidence=0.3,
-        )
-    except Exception as e:
-        raise ValueError(f"Failed to analyze transcript with Claude: {str(e)}")
+
+agent_builder.add_node("has_prescription_node", has_prescription)
+agent_builder.add_node("extract_drug_prescription_node", extract_drug_prescription)
