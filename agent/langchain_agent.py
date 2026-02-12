@@ -4,7 +4,7 @@ from langchain.messages import AnyMessage
 from typing_extensions import TypedDict, Annotated
 import operator
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Literal, Optional
 from dotenv import load_dotenv
 import os
 from langgraph.graph import StateGraph, START, END
@@ -37,14 +37,6 @@ class ListPrescriptionExtractionModel(BaseModel):
     extraction_confidence: float
 
 
-class PrescriptionGraphState(BaseModel):
-    messages: list[AnyMessage]
-    llm_calls: int = 0
-    transcript: Optional[str] = None
-    extracted_prescriptions: Optional[ListPrescriptionExtractionModel] = None
-    summary: Optional[str] = None
-
-
 class HasPrescriptionModel(BaseModel):
     has_prescription: Optional[bool] = None
     has_prescription_confidence: Optional[float] = Field(
@@ -54,13 +46,21 @@ class HasPrescriptionModel(BaseModel):
     )
 
 
+class PrescriptionGraphState(BaseModel):
+    messages: list[AnyMessage]
+    llm_calls: int = 0
+    transcript: Optional[str] = None
+    extracted_prescriptions: Optional[ListPrescriptionExtractionModel] = None
+    summary: Optional[str] = None
+    has_prescription_output: Optional[HasPrescriptionModel] = None
+
+
 client = AsyncOpenAI(api_key=llm_key)
 
 
-agent_builder = StateGraph(PrescriptionGraphState)
-
-
-async def has_prescription(state: PrescriptionGraphState) -> dict:
+async def has_prescription(
+    state: PrescriptionGraphState,
+) -> dict:
     """From the message input, LLM verify if there is any drug prescription"""
     system_prompt = (
         "Determine whether the following doctor-patient conversation includes "
@@ -92,6 +92,14 @@ async def has_prescription(state: PrescriptionGraphState) -> dict:
             response.output_parsed
         )
     }
+
+
+def route_if_prescription(state: PrescriptionGraphState) -> str:
+    if state.has_prescription_output is None:
+        raise ValueError("has_prescription_output missing")
+    if state.has_prescription_output.has_prescription:
+        return "extract_drug_prescription_node"
+    return "END"
 
 
 async def extract_drug_prescription(
@@ -138,5 +146,13 @@ Return structured data only.
     }
 
 
+agent_builder = StateGraph(PrescriptionGraphState)
 agent_builder.add_node("has_prescription_node", has_prescription)
 agent_builder.add_node("extract_drug_prescription_node", extract_drug_prescription)
+
+agent_builder.add_edge(START, "has_prescription_node")
+agent_builder.add_conditional_edges(
+    "has_prescription_node",
+    route_if_prescription,
+    {"extract_drug_prescription": "extract_drug_prescription_node", "END": END},
+)
