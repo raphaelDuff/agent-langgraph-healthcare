@@ -8,6 +8,7 @@ from typing import Literal, Optional
 from dotenv import load_dotenv
 import os
 from langgraph.graph import StateGraph, START, END
+import asyncio
 
 
 load_dotenv()
@@ -47,7 +48,6 @@ class HasPrescriptionModel(BaseModel):
 
 
 class PrescriptionGraphState(BaseModel):
-    messages: list[AnyMessage]
     llm_calls: int = 0
     transcript: Optional[str] = None
     extracted_prescriptions: Optional[ListPrescriptionExtractionModel] = None
@@ -66,13 +66,8 @@ async def has_prescription(
         "Determine whether the following doctor-patient conversation includes "
         "any medication prescription."
     )
-    messages = state.messages
-    last_message = messages[-1]
-    if not isinstance(last_message.content, str):
-        raise ValueError(
-            "Failed to parse output answer related to has_precription node"
-        )
-    state.transcript = last_message.content
+    if state.transcript is None:
+        raise ValueError("Failed to load transcript @ has_precription node")
 
     response = await client.responses.parse(
         model="gpt-4.1-mini",
@@ -94,7 +89,7 @@ async def has_prescription(
     }
 
 
-def route_if_prescription(state: PrescriptionGraphState) -> str:
+async def route_if_prescription(state: PrescriptionGraphState) -> str:
     if state.has_prescription_output is None:
         raise ValueError("has_prescription_output missing")
     if state.has_prescription_output.has_prescription:
@@ -140,7 +135,7 @@ Return structured data only.
     if response.output_parsed is None:
         raise ValueError("Failed to parse prescription extraction output")
     return {
-        "prescription_output": ListPrescriptionExtractionModel.model_validate(
+        "extracted_prescriptions": ListPrescriptionExtractionModel.model_validate(
             response.output_parsed
         )
     }
@@ -154,5 +149,23 @@ agent_builder.add_edge(START, "has_prescription_node")
 agent_builder.add_conditional_edges(
     "has_prescription_node",
     route_if_prescription,
-    {"extract_drug_prescription": "extract_drug_prescription_node", "END": END},
+    {"extract_drug_prescription_node": "extract_drug_prescription_node", "END": END},
 )
+
+chain = agent_builder.compile()
+test_transcript = "Doctor: I'm prescribing amoxicillin 4000mg. Patient: How often should I take it? Doctor: Three times daily for 7 days."
+
+
+async def main():
+    state = await chain.ainvoke(
+        PrescriptionGraphState(
+            transcript="Doctor: I'm prescribing amoxicillin 4000mg. "
+            "Take it three times daily for 7 days."
+        )
+    )
+
+    print("Has prescription:", state["has_prescription_output"])
+    print("Extracted:", state["extracted_prescriptions"])
+
+
+asyncio.run(main())
