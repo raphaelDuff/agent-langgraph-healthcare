@@ -15,11 +15,6 @@ load_dotenv()
 llm_key = os.getenv("OPENAI_APIKEY")
 
 
-class MessagesState(TypedDict):
-    messages: Annotated[list[AnyMessage], operator.add]
-    llm_calls: int
-
-
 class ExtractedPrescription(BaseModel):
     drug_name: str
     dosage_value: Optional[float]
@@ -153,17 +148,15 @@ agent_builder.add_conditional_edges(
 )
 
 chain = agent_builder.compile()
+chain_image = chain.get_graph().draw_mermaid_png()
+with open("graph.png", "wb") as f:
+    f.write(chain_image)
+
 test_transcript = "Doctor: I'm prescribing amoxicillin 4000mg. Patient: How often should I take it? Doctor: Three times daily for 7 days."
 
 
 async def main():
-    state = await chain.ainvoke(
-        PrescriptionGraphState(
-            transcript="Doctor: I'm prescribing amoxicillin 4000mg. "
-            "Take it three times daily for 7 days."
-        )
-    )
-
+    state = await chain.ainvoke(PrescriptionGraphState(transcript=test_transcript))
     print("Has prescription:", state["has_prescription_output"])
     print("Extracted:", state["extracted_prescriptions"])
 
