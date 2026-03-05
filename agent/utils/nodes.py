@@ -1,54 +1,13 @@
-from langchain.tools import tool
 from openai import AsyncOpenAI
-from langchain.messages import AnyMessage
-from typing_extensions import TypedDict, Annotated
-import operator
-from pydantic import BaseModel, Field
-from typing import Literal, Optional
 from dotenv import load_dotenv
 import os
-from langgraph.graph import StateGraph, START, END
-import asyncio
-
+from agent.utils.state import PrescriptionGraphState
+from agent.utils.models import HasPrescriptionModel, ListPrescriptionExtractionModel
 
 load_dotenv()
+
+
 llm_key = os.getenv("OPENAI_APIKEY")
-
-
-class ExtractedPrescription(BaseModel):
-    drug_name: str
-    dosage_value: Optional[float]
-    dosage_unit: Optional[str]
-    frequency: Optional[str]
-    duration: Optional[str]
-    route: Optional[str]
-    form: Optional[str]
-    instructions: Optional[str]
-    confidence: float = Field(gt=0, le=1.0)
-
-
-class ListPrescriptionExtractionModel(BaseModel):
-    prescriptions: list[ExtractedPrescription]
-    missing_fields: list[str]
-    extraction_confidence: float
-
-
-class HasPrescriptionModel(BaseModel):
-    has_prescription: Optional[bool] = None
-    has_prescription_confidence: Optional[float] = Field(
-        default=None,
-        gt=0,
-        le=1.0,
-    )
-
-
-class PrescriptionGraphState(BaseModel):
-    llm_calls: int = 0
-    transcript: Optional[str] = None
-    extracted_prescriptions: Optional[ListPrescriptionExtractionModel] = None
-    summary: Optional[str] = None
-    has_prescription_output: Optional[HasPrescriptionModel] = None
-
 
 client = AsyncOpenAI(api_key=llm_key)
 
@@ -134,31 +93,3 @@ Return structured data only.
             response.output_parsed
         )
     }
-
-
-agent_builder = StateGraph(PrescriptionGraphState)
-agent_builder.add_node("has_prescription_node", has_prescription)
-agent_builder.add_node("extract_drug_prescription_node", extract_drug_prescription)
-
-agent_builder.add_edge(START, "has_prescription_node")
-agent_builder.add_conditional_edges(
-    "has_prescription_node",
-    route_if_prescription,
-    {"extract_drug_prescription_node": "extract_drug_prescription_node", "END": END},
-)
-
-chain = agent_builder.compile()
-chain_image = chain.get_graph().draw_mermaid_png()
-with open("graph.png", "wb") as f:
-    f.write(chain_image)
-
-test_transcript = "Doctor: I'm prescribing amoxicillin 4000mg. Patient: How often should I take it? Doctor: Three times daily for 7 days."
-
-
-async def main():
-    state = await chain.ainvoke(PrescriptionGraphState(transcript=test_transcript))
-    print("Has prescription:", state["has_prescription_output"])
-    print("Extracted:", state["extracted_prescriptions"])
-
-
-asyncio.run(main())

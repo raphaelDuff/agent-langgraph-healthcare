@@ -17,7 +17,6 @@ def load_json_data(file_path: str, base_dir=BASE_DIR) -> list[dict[str, str]]:
 
 # Step 1.1: Connect to your local Weaviate instance
 with weaviate.connect_to_local() as client:
-
     if client.collections.exists("drug_dosage_collection"):
         client.collections.delete("drug_dosage_collection")
 

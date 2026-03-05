@@ -4,7 +4,6 @@ from weaviate.classes.generate import GenerativeConfig
 
 
 with weaviate.connect_to_local() as client:
-
     movies = client.collections.use("drug_dosage_collection")
 
     response = movies.generate.near_text(
@@ -22,7 +21,6 @@ with weaviate.connect_to_local() as client:
 
 def retrieval_function(query: str) -> str:
     with weaviate.connect_to_local() as client:
-
         drugs = client.collections.use("drug_dosage_collection")
 
         response = drugs.generate.near_text(
